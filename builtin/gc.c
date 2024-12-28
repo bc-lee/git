@@ -1951,6 +1951,51 @@ static char *launchctl_get_uid(void)
 	return xstrfmt("gui/%d", getuid());
 }
 
+/*
+ * Compare two buffers that represent launchctl property lists, but ignore
+ * lines that contain <key>Minute</key><integer>...</integer> because the
+ * minute values are not significant for comparison.
+ */
+static int launchctl_plist_cmp_ignore_minute(const struct strbuf *a,
+					     const struct strbuf *b)
+{
+	char *buf_a = xstrndup(a->buf, a->len);
+	char *buf_b = xstrndup(b->buf, b->len);
+	char *line_a = buf_a;
+	char *line_b = buf_b;
+	int result = 0;
+
+	while (line_a && line_b) {
+		char *next_line_a = strchr(line_a, '\n');
+		char *next_line_b = strchr(line_b, '\n');
+
+		if (next_line_a)
+			*next_line_a = '\0';
+		if (next_line_b)
+			*next_line_b = '\0';
+
+		if (strstr(line_a, "<key>Minute</key><integer>") &&
+		    strstr(line_a, "</integer>") &&
+		    strstr(line_b, "<key>Minute</key><integer>") &&
+		    strstr(line_b, "</integer>")) {
+			line_a = next_line_a ? next_line_a + 1 : NULL;
+			line_b = next_line_b ? next_line_b + 1 : NULL;
+			continue;
+		}
+
+		result = strcmp(line_a, line_b);
+		if (result)
+			break;
+
+		line_a = next_line_a ? next_line_a + 1 : NULL;
+		line_b = next_line_b ? next_line_b + 1 : NULL;
+	}
+
+	free(buf_a);
+	free(buf_b);
+	return result;
+}
+
 static int launchctl_boot_plist(int enable, const char *filename)
 {
 	char *cmd;
@@ -2022,7 +2067,6 @@ static int launchctl_schedule_plist(const char *exec_path, enum schedule_priorit
 	struct lock_file lk = LOCK_INIT;
 	static unsigned long lock_file_timeout_ms = ULONG_MAX;
 	struct strbuf plist = STRBUF_INIT, plist2 = STRBUF_INIT;
-	struct stat st;
 	char *cmd;
 	int minute = get_random_minute();
 
@@ -2100,9 +2144,8 @@ static int launchctl_schedule_plist(const char *exec_path, enum schedule_priorit
 	 * Does this file already exist? With the intended contents? Is it
 	 * registered already? Then it does not need to be re-registered.
 	 */
-	if (!stat(filename, &st) && st.st_size == plist.len &&
-	    strbuf_read_file(&plist2, filename, plist.len) == plist.len &&
-	    !strbuf_cmp(&plist, &plist2) &&
+	if (strbuf_read_file(&plist2, filename, plist.len) >= 0 &&
+	    !launchctl_plist_cmp_ignore_minute(&plist, &plist2) &&
 	    launchctl_list_contains_plist(name, cmd))
 		rollback_lock_file(&lk);
 	else {
